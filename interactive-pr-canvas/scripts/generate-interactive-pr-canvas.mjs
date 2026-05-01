@@ -3,17 +3,18 @@
  * Reads a unified diff + JSON specs → emits a single .canvas.tsx with embedded chunks.
  *
  * Usage (cwd = skill directory, or pass full path to this file):
- *   node scripts/generate-interactive-pr-canvas.mjs --pr 11 --specs - < /tmp/pr-11-specs.json
- *   node scripts/generate-interactive-pr-canvas.mjs --diff /tmp/pr.diff --specs ./review-specs.json
+ *   node scripts/generate-interactive-pr-canvas.mjs --pr 11 --specs - < ~/.../pr-11-specs.json
+ *   node scripts/generate-interactive-pr-canvas.mjs --diff ./pr.diff --specs ./review-specs.json
  *
  * Stdin:
- *   --specs -  reads specs JSON from stdin (keeps specs out of the repo; use /tmp or a pipe).
+ *   --specs -  reads specs JSON from stdin (pipe or redirect). Prefer a workspace-relative path when using an agent — not ~/.cursor/... (see SKILL).
  *   --diff -   reads unified diff from stdin (cannot combine with --specs -; use --pr for diff).
  *
  * Env:
- *   INTERACTIVE_PR_CANVAS_DIFF        — default diff path (default: /tmp/interactive-pr-canvas.diff)
+ *   INTERACTIVE_PR_CANVAS_DIFF        — default diff path (<git-root>/tmp/interactive-pr-canvas.diff, or cwd if not in a repo; avoids ~/.cursor prompts)
  *   INTERACTIVE_PR_CANVAS_SPECS       — default specs JSON path
- *   INTERACTIVE_PR_CANVAS_SPECS_JSON  — inline specs JSON (skip --specs; avoids any specs file)
+ *   INTERACTIVE_PR_CANVAS_KEEP_SPECS  — if 1, keep on-disk --specs after success (see --keep-specs)
+ *   INTERACTIVE_PR_CANVAS_SPECS_JSON  — inline specs JSON (skip --specs; avoids any specs file or mkdir ./tmp)
  *   CURSOR_CANVAS_OUT                 — output file (overrides default below)
  *   CURSOR_PROJECT_SLUG               — ~/.cursor/projects/<slug>/canvases/ when --out omitted
  *
@@ -32,12 +33,33 @@
  *   componentName — valid JS identifier for default export (default: InteractivePrReviewCanvas)
  */
 import fs from "fs";
+import os from "os";
 import path from "path";
 import { execFileSync } from "child_process";
 import { fileURLToPath } from "url";
 
-const DEFAULT_DIFF = "/tmp/interactive-pr-canvas.diff";
 const STRIP_DEFAULT = 7500;
+
+/** Output folder for emitted .canvas.tsx (~/.cursor/projects/<slug>/canvases). @param {string} [slug] */
+function canvasesDir(slug) {
+  const base = os.homedir();
+  return path.join(
+    base,
+    ".cursor/projects",
+    slug || "workspace",
+    "canvases",
+  );
+}
+
+/** Default unified-diff disk path when not using --pr; kept under repo `tmp/` (not ~/.cursor/canvases) so agents avoid sandbox prompts. */
+function defaultDiffPath() {
+  try {
+    const root = gitRevParseTopLevel() || process.cwd();
+    return path.join(root, "tmp", "interactive-pr-canvas.diff");
+  } catch {
+    return path.join(os.tmpdir(), "interactive-pr-canvas", "interactive-pr-canvas.diff");
+  }
+}
 
 function parseArgs(argv) {
   const out = {};
@@ -53,21 +75,45 @@ function parseArgs(argv) {
     else if (a === "--pr") out.pr = argv[++i];
     else if (a === "--project-slug") out.projectSlug = argv[++i];
     else if (a === "--strip") out.strip = Number(argv[++i]);
+    else if (a === "--keep-specs") out.keepSpecs = true;
     else console.warn("Unknown arg:", a);
   }
   return out;
 }
 
-function gitWorkspaceSlug(cwd = process.cwd()) {
+function gitRevParseTopLevel(cwd = process.cwd()) {
   try {
-    const root = execFileSync("git", ["rev-parse", "--show-toplevel"], {
+    return execFileSync("git", ["rev-parse", "--show-toplevel"], {
       cwd,
       encoding: "utf8",
     }).trim();
-    return path.basename(root);
   } catch {
-    return path.basename(cwd);
+    return "";
   }
+}
+
+function gitWorkspaceSlug(cwd = process.cwd()) {
+  const root = gitRevParseTopLevel(cwd);
+  return root ? path.basename(root) : path.basename(cwd);
+}
+
+/** True if fileAbs is file or path inside parentAbs (resolved). */
+function isPathUnderParent(fileAbs, parentAbs) {
+  const f = path.resolve(fileAbs);
+  const p = path.resolve(parentAbs);
+  return f === p || f.startsWith(p + path.sep);
+}
+
+/**
+ * Ephemeral specs path we may delete after success: under <git-root>/tmp, or if not in a repo under <cwd>/tmp.
+ * @param {string} absPath
+ */
+function isEphemeralSpecsPathForCleanup(absPath) {
+  const root = gitRevParseTopLevel();
+  const abs = path.resolve(absPath);
+  if (root && isPathUnderParent(abs, path.join(root, "tmp"))) return true;
+  if (!root && isPathUnderParent(abs, path.join(process.cwd(), "tmp"))) return true;
+  return false;
 }
 
 function readStdinUtf8() {
@@ -1046,16 +1092,8 @@ export function generateInteractivePrCanvas(options) {
 }
 
 function defaultOutPath(prLabel, slug) {
-  const base =
-    process.env.HOME || process.env.USERPROFILE || path.dirname(process.cwd());
   const prSlug = prLabel.replace(/\//g, "-") || "review";
-  return path.join(
-    base,
-    ".cursor/projects",
-    slug,
-    "canvases",
-    `pr-${prSlug}-narrative-review.canvas.tsx`
-  );
+  return path.join(canvasesDir(slug), `pr-${prSlug}-narrative-review.canvas.tsx`);
 }
 
 function main() {
@@ -1072,13 +1110,17 @@ Options:
   --diff PATH          Unified diff file, or "-" for stdin (env: INTERACTIVE_PR_CANVAS_DIFF)
   --specs PATH         JSON array or { meta, chunks }, or "-" for stdin
   --out PATH           Output .canvas.tsx (env: CURSOR_CANVAS_OUT)
-  --project-slug NAME  Cursor projects folder segment (env: CURSOR_PROJECT_SLUG)
+  --project-slug NAME  Subdir under ~/.cursor/projects (env CURSOR_PROJECT_SLUG). List that folder; names are often path-derived (e.g. home-user-repo) not only git basename
   --strip N            Base64 slice size (${STRIP_DEFAULT})
   --include-tests      Do not skip *.test.ts(x)
+  --keep-specs         Do not delete --specs file after success (env: INTERACTIVE_PR_CANVAS_KEEP_SPECS=1)
 
-Specs without a repo file:
-  - \`--specs -\` and redirect/heredoc from /tmp, or pipe JSON on stdin.
-  - env INTERACTIVE_PR_CANVAS_SPECS_JSON=\'...\' (no --specs).
+Ephemeral specs: after a successful write, removes the on-disk --specs file when it lives under <git-root>/tmp/ (or ./tmp when not in a repo), unless --keep-specs.
+
+Specs without committing to git:
+  - \`INTERACTIVE_PR_CANVAS_SPECS_JSON\` (no specs file — best for Cursor agents)
+  - \`--specs -\` plus redirect/pipe from a workspace path (e.g. ./tmp/specs.json)
+  - env INTERACTIVE_PR_CANVAS_SPECS=path
 
 Specs meta (optional): title, prUrl, stateKey, introSuffix, footerStats,
   componentName, pr
@@ -1111,11 +1153,16 @@ See scripts/prompts/chapter-grouping.md for LLM instructions to produce specs JS
     process.exit(1);
   }
 
+  const slug =
+    argv.projectSlug?.trim() ||
+    process.env.CURSOR_PROJECT_SLUG?.trim() ||
+    gitWorkspaceSlug();
+
   const diffExplicit = !!argv.diffExplicit;
   let diffPath =
     argv.diff?.trim() ||
     process.env.INTERACTIVE_PR_CANVAS_DIFF?.trim() ||
-    DEFAULT_DIFF;
+    defaultDiffPath();
 
   if (prArg && !diffExplicit) {
     diffPath = "__GH_PR_DIFF__";
@@ -1131,6 +1178,11 @@ See scripts/prompts/chapter-grouping.md for LLM instructions to produce specs JS
   const stripLen =
     Number.isFinite(argv.strip) && argv.strip > 0 ? argv.strip : STRIP_DEFAULT;
 
+  const keepSpecs =
+    !!argv.keepSpecs ||
+    process.env.INTERACTIVE_PR_CANVAS_KEEP_SPECS === "1";
+
+  let resolvedSpecsPath = null;
   let specsBundle;
   try {
     if (specsFromEnvJson) {
@@ -1138,17 +1190,13 @@ See scripts/prompts/chapter-grouping.md for LLM instructions to produce specs JS
     } else if (specsPathArg === "-") {
       specsBundle = parseSpecsJson(readStdinUtf8());
     } else {
-      specsBundle = loadSpecsFromPath(path.resolve(specsPathArg));
+      resolvedSpecsPath = path.resolve(specsPathArg);
+      specsBundle = loadSpecsFromPath(resolvedSpecsPath);
     }
   } catch (e) {
     console.error(e.message || e);
     process.exit(1);
   }
-
-  const slug =
-    argv.projectSlug?.trim() ||
-    process.env.CURSOR_PROJECT_SLUG?.trim() ||
-    gitWorkspaceSlug();
 
   const prHint =
     specsBundle.meta.pr !== undefined && specsBundle.meta.pr !== null
@@ -1182,6 +1230,24 @@ See scripts/prompts/chapter-grouping.md for LLM instructions to produce specs JS
     includeTests: !!argv.includeTests,
     stripLen,
   });
+
+  if (
+    resolvedSpecsPath &&
+    !keepSpecs &&
+    isEphemeralSpecsPathForCleanup(resolvedSpecsPath)
+  ) {
+    try {
+      fs.unlinkSync(resolvedSpecsPath);
+      console.log("Removed ephemeral specs file:", resolvedSpecsPath);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      console.warn(
+        "Could not remove ephemeral specs file:",
+        resolvedSpecsPath,
+        msg
+      );
+    }
+  }
 }
 
 const isMain =

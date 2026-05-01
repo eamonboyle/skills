@@ -25,11 +25,23 @@ Paths are **relative to this skill directory** (the folder containing `SKILL.md`
 
 **Sharing:** Copy **`.cursor/skills/interactive-pr-canvas/`** (whole tree, including **`scripts/`**) into another repo under `.cursor/skills/`. Only `gh`, Node, and Cursor canvas support are required—no application code.
 
+## Cross-platform (Windows, macOS, Linux)
+
+The generator is **plain Node** (`.mjs`)—paths use **`path.join`** / **`path.resolve`** so drives and separators follow the OS where **`node`** runs.
+
+| Topic | Notes |
+|--------|--------|
+| **Home / Cursor dirs** | Default canvas output resolves under **`os.homedir()`** → Windows **`%USERPROFILE%\.cursor\projects\<workspace-key>\canvases\`**, Unix **`~/.cursor/projects/...`**. **`CURSOR_CANVAS_OUT`** overrides entirely if slug guessing is awkward. |
+| **`git` / `gh`** | **`execFileSync`** looks up **`git`** and **`gh`** on **`PATH`**. Install [Git for Windows](https://git-scm.com/download/win) and the GitHub CLI; use the **same environment** Cursor uses (native Windows vs WSL)—mixed setups may need **`CURSOR_CANVAS_OUT`** pointed at the folder Cursor actually reads. |
+| **Unified diff paths** | `git` / `gh pr diff` emit `a/…` and `b/…` paths with forward slashes; parsing stays consistent on Windows checkouts. |
+| **Shell examples** | Bash **` < ./tmp/specs.json`** is Unix-centric. **Portable:** set **`INTERACTIVE_PR_CANVAS_SPECS_JSON`** from your runner, or **`INTERACTIVE_PR_CANVAS_SPECS`** to a file path. PowerShell stdin: **`Get-Content .\tmp\pr-123-specs.json -Raw \| node ... --specs -`** (pipe UTF-8 text). |
+
 ## Before you start
 
 1. Read the canvas SDK exports in `~/.cursor/skills-cursor/canvas/sdk/index.d.ts` when you need exact prop types (`DiffView`, `useCanvasState`, `Pill`, etc.).
 2. **PR source of truth**: `gh pr diff <ref>` from a repo where `gh` is authenticated. If the user did not give a PR URL, number, or branch resolvable by `gh`, **ask**—do not guess from an arbitrary local `git diff`.
-3. Resolve the Cursor canvases directory: **`~/.cursor/projects/<workspace-folder-name>/canvases/`** (same rule as the canvas skill). Write **one** `.canvas.tsx` file with a descriptive kebab-case name (e.g. `pr-123-narrative-review.canvas.tsx`).
+3. **Emit path (matches Cursor exactly):** Canvases are stored under **`~/.cursor/projects/<workspace-key>/canvases/<name>.canvas.tsx`**. Cursor’s **`<workspace-key>`** encodes your machine/workspace path as a hyphenated segment (paths like **`/home/eamon/code/skills`** often become **`home-eamon-code-skills`**), **not necessarily** **`basename`** of git’s **`toplevel`** (e.g. `skills`). **Example:** **`/home/eamon/.cursor/projects/home-eamon-code-skills/canvases/codebase-overview.canvas.tsx`**. If unsure, **`list`** **`~/.cursor/projects/`** and pick the folder for this workspace—then set **`--project-slug`** / **`CURSOR_PROJECT_SLUG`** to match that directory name (**`CURSOR_CANVAS_OUT`** still overrides **`--out`** when needed).
+4. **Specs JSON and sandbox prompts:** Writes under **`~/.../canvases/`** trigger Cursor permission even for **`pr-N-specs.json`** — that folder is guarded. **You do not need any `*-specs.json` file:** pass the same JSON via **`INTERACTIVE_PR_CANVAS_SPECS_JSON`** (often as a single-quoted env value in the shell) and the generator never reads or creates a specs path. **`mkdir tmp` / `./tmp/`** or creating files under OS **`/tmp`** can also trigger **Allow** prompts—**agents should use `INTERACTIVE_PR_CANVAS_SPECS_JSON` + `--pr`** so nothing in the workspace (or system temp) is created for specs, and diff comes from **`gh`** in memory. Only the final **`.canvas.tsx`** write (under **`~/.cursor/.../canvases/`** or **`CURSOR_CANVAS_OUT`**) remains. If a file-based flag is unavoidable, **`--specs -`** with a pipe avoids a named specs file but still uses stdin. Default **`INTERACTIVE_PR_CANVAS_DIFF`** is **`(git-repo-root)/tmp/interactive-pr-canvas.diff`** when you rely on a on-disk diff without **`--pr`**—that path does **not** imply the generator creates **`tmp/`**; it only **reads** if present.
 
 ## What to build
 
@@ -133,33 +145,62 @@ To have a model propose chapters and `files` lists from a PR description + diff 
 
 1. Resolve unified diff: **`gh pr diff`** via **`--pr <ref>`**, or **`--diff`** file.
 2. Optionally use **`scripts/prompts/chapter-grouping.md`** + model to produce **`chunks`** JSON (thematic `files` arrays).
-3. Run **`scripts/generate-interactive-pr-canvas.mjs`** with **`--specs -`** (stdin), **`INTERACTIVE_PR_CANVAS_SPECS_JSON`**, or **`/tmp/...json`**.
+3. Run **`scripts/generate-interactive-pr-canvas.mjs`** with **`INTERACTIVE_PR_CANVAS_SPECS_JSON`** (**agents:** avoids writing specs anywhere), **`--specs`** path (**prefer workspace `./tmp/...`**), or **`--specs -`** (stdin).
 4. Tell the user where the `.canvas.tsx` lives.
 
-### Keep specs out of the git repo
+### Intermediate specs (sandbox: avoid needless prompts)
 
-Canvas output: **`~/.cursor/projects/.../canvases/`**. Prefer **`/tmp`** or stdin for specs; avoid committing `*-specs.json` unless the user wants tracked examples.
+The **artifact** MUST land at **`~/.../canvases/<name>.canvas.tsx`**. Putting **`pr-*-specs.json`** in that same **`canvases/`** folder still triggers the **Allow canvases/** gate—Cursor treats writes there uniformly.
 
-**Typical workflow** (from repo root; adjust `--project-slug` if needed):
+**Recommended for agents (no specs file, no `./tmp`):**
+
+1. **`INTERACTIVE_PR_CANVAS_SPECS_JSON`** — JSON in the environment only (**best default**); pair with **`--pr`** so diff never touches disk either.
+2. **`--specs -`** — stdin (`pipe` / redirect); still no persisted **`specs.json`** if you stream JSON only once.
+
+**Optional file paths** (may prompt to create **`tmp/`** or write paths Cursor guards):
+
+3. **`--specs ./tmp/pr-<n>-specs.json`** — workspace-relative (**needs `./tmp`** unless it already exists).
+
+After success, **`generate-interactive-pr-canvas.mjs`** deletes the **`--specs`** disk file automatically when its path resolves inside the git repo’s **`tmp/`** subtree (when not in git: under **`cwd/tmp/`**) so stray JSON does not linger. Preserve it with **`--keep-specs`** or **`INTERACTIVE_PR_CANVAS_KEEP_SPECS=1`**. (**`INTERACTIVE_PR_CANVAS_SPECS_JSON`** and **`--specs -`** imply nothing named by **`--specs`** alone to unlink.)
+
+The generator’s fallback diff path (**when neither `--pr` nor explicit `--diff`**) is **`(git-repo-root)/tmp/interactive-pr-canvas.diff`**—see **`INTERACTIVE_PR_CANVAS_DIFF`**.
+
+Canvas output: **`CURSOR_CANVAS_OUT`**, else default **`~/.cursor/projects/<workspace-key>/canvases/*.canvas.tsx`** (that write may prompt once—it is the deliverable). The **workspace-key** subdirectory must match **`~/.cursor/projects/`** (run **`ls`** there)—do **not** assume it equals **`$(basename "$(git rev-parse --show-toplevel)")`** (often it does **not**).
+
+**Typical workflow (env-only specs — no `spec.json`, no `mkdir tmp`):**
 
 ```bash
+export INTERACTIVE_PR_CANVAS_SPECS_JSON='{"meta":{"pr":"123"},"chunks":[{"headline":"Theme","takeaway":"Change: …","files":[{"path":"src/example.ts"}]}]}'
+SLUG="home-eamon-code-skills"   # ls ~/.cursor/projects/
 node .cursor/skills/interactive-pr-canvas/scripts/generate-interactive-pr-canvas.mjs \
   --pr 123 \
-  --specs - < /tmp/pr-123-specs.json \
-  --project-slug "$(basename "$(git rev-parse --show-toplevel)")"
+  --project-slug "$SLUG"
 ```
 
-If you `cd` to the skill directory instead:
+**Alternative — specs file under `./tmp`** (requires creating **`tmp/`** first if missing):
 
 ```bash
-cd .cursor/skills/interactive-pr-canvas
-node scripts/generate-interactive-pr-canvas.mjs --pr 123 --specs - < /tmp/pr-123-specs.json \
-  --project-slug "$(basename "$(git rev-parse --show-toplevel)")"
+mkdir -p tmp
+SLUG="home-eamon-code-skills"
+node .cursor/skills/interactive-pr-canvas/scripts/generate-interactive-pr-canvas.mjs \
+  --pr 123 \
+  --specs ./tmp/pr-123-specs.json \
+  --project-slug "$SLUG"
 ```
 
-Use **`CURSOR_CANVAS_OUT`** when the Cursor project folder name does not match `git`’s repo basename.
+Stdin (still no persistent **`specs.json`** if you pipe without saving):
 
-**Env:** **`INTERACTIVE_PR_CANVAS_DIFF`**, **`INTERACTIVE_PR_CANVAS_SPECS`**, **`INTERACTIVE_PR_CANVAS_SPECS_JSON`**, **`CURSOR_PROJECT_SLUG`**, **`CURSOR_CANVAS_OUT`**.
+```bash
+SLUG="home-eamon-code-skills"
+node .cursor/skills/interactive-pr-canvas/scripts/generate-interactive-pr-canvas.mjs \
+  --pr 123 \
+  --specs - < ./tmp/pr-123-specs.json \
+  --project-slug "$SLUG"
+```
+
+Use **`CURSOR_CANVAS_OUT`** for a literal output path regardless of **`--project-slug`**.
+
+**Env:** **`INTERACTIVE_PR_CANVAS_DIFF`**, **`INTERACTIVE_PR_CANVAS_SPECS`**, **`INTERACTIVE_PR_CANVAS_SPECS_JSON`**, **`INTERACTIVE_PR_CANVAS_KEEP_SPECS`** (equals **`1`** to keep ephemeral **`--specs`** files under **`tmp/`**), **`CURSOR_PROJECT_SLUG`**, **`CURSOR_CANVAS_OUT`**.
 
 ## Tone
 
