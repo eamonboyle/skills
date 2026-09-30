@@ -17,6 +17,7 @@ That pulls skills from this repo into your environment according to the `skills`
 | Skill | Summary |
 |--------|---------|
 | [**interactive-pr-canvas**](interactive-pr-canvas/SKILL.md) | Build a Cursor canvas for GitHub PR review: chapters, narrative, unified diff excerpts, file navigation, and a Node generator script. |
+| [**pr-review-defects-only**](pr-review-defects-only/SKILL.md) | Defects-only review of a PR, branch, or diff: flags bugs, security holes, regressions, data loss, and real performance issues, with no style nits or refactor suggestions. |
 
 ## Layout
 
